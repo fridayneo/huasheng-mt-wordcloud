@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>即時文字雲 · 展示</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      width: 100%; height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      background: var(--bg); color: var(--text);
+      overflow: hidden;
+    }
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0;
+      padding: 14px 20px;
+      display: flex; align-items: center; justify-content: space-between;
+      background: linear-gradient(to bottom, rgba(15,23,42,0.95), rgba(15,23,42,0));
+      z-index: 10;
+    }
+    .topbar h1 {
+      margin: 0; font-size: 18px; font-weight: 600;
+    }
+    .stats {
+      display: flex; gap: 16px;
+      font-size: 13px; color: var(--muted);
+    }
+    .stats .num { color: var(--accent); font-weight: 600; }
+    #cloud {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .empty {
+      color: var(--muted); font-size: 16px; text-align: center;
+    }
+    .empty .url { color: var(--accent); font-family: ui-monospace, monospace; }
+    .pulse {
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 1; }
+    }
+    text { transition: font-size 0.5s ease, fill 0.5s ease; }
+  </style>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://unpkg.com/d3-cloud@1.2.7/build/d3.layout.cloud.js"></script>
+</head>
+<body>
+  <div class="topbar">
+    <h1>📊 即時文字雲</h1>
+    <div class="stats">
+      <span>總送出 <span id="total" class="num">0</span></span>
+      <span>不同詞 <span id="unique" class="num">0</span></span>
+      <span class="pulse">● 即時連線中</span>
+    </div>
+  </div>
+
+  <div id="cloud">
+    <div class="empty" id="empty">
+      <div>還沒有人送出關鍵字</div>
+      <div style="margin-top:8px;font-size:13px;">前往 <span class="url">/index.html</span> 開始輸入</div>
+    </div>
+  </div>
+
+  <script type="module">
+    import {
+      db, collection, query, orderBy, limit, onSnapshot,
+    } from "./firebase-config.js";
+
+    const cloudEl = document.getElementById("cloud");
+    const emptyEl = document.getElementById("empty");
+    const totalEl = document.getElementById("total");
+    const uniqueEl = document.getElementById("unique");
+
+    const palette = [
+      "#38bdf8", "#a78bfa", "#f472b6", "#facc15",
+      "#4ade80", "#fb923c", "#22d3ee", "#f87171",
+    ];
+
+    let svg = null;
+    let lastSize = "";
+
+    function ensureSvg() {
+      if (svg) return svg;
+      svg = d3.select("#cloud")
+        .append("svg")
+        .attr("width", "100%")
+        .attr("height", "100%")
+        .append("g");
+      return svg;
+    }
+
+    function tally(docs) {
+      const counts = new Map();
+      for (const d of docs) {
+        const t = (d.text || "").trim();
+        if (!t) continue;
+        counts.set(t, (counts.get(t) || 0) + 1);
+      }
+      return Array.from(counts, ([text, value]) => ({ text, value }));
+    }
+
+    function render(words) {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+
+      // Hide / show empty state
+      emptyEl.style.display = words.length === 0 ? "" : "none";
+      if (words.length === 0) {
+        if (svg) svg.selectAll("*").remove();
+        return;
+      }
+
+      const max = Math.max(...words.map(w => w.value));
+      const min = Math.min(...words.map(w => w.value));
+      const sizeScale = d3.scaleLinear()
+        .domain([min, max === min ? max + 1 : max])
+        .range([24, Math.min(120, w * 0.12)]);
+
+      d3.layout.cloud()
+        .size([w, h - 60])
+        .words(words.map(d => ({ text: d.text, size: sizeScale(d.value), value: d.value })))
+        .padding(6)
+        .rotate(() => (Math.random() > 0.7 ? 90 : 0))
+        .font("PingFang TC, Microsoft JhengHei, sans-serif")
+        .fontSize(d => d.size)
+        .on("end", draw)
+        .start();
+
+      function draw(laidOut) {
+        const g = ensureSvg();
+        g.attr("transform", `translate(${w / 2},${h / 2})`);
+
+        const sel = g.selectAll("text").data(laidOut, d => d.text);
+
+        sel.exit().remove();
+
+        const entered = sel.enter().append("text")
+          .style("font-family", "PingFang TC, Microsoft JhengHei, sans-serif")
+          .style("font-weight", 600)
+          .attr("text-anchor", "middle")
+          .attr("opacity", 0);
+
+        entered.merge(sel)
+          .text(d => d.text)
+          .attr("transform", d => `translate(${d.x},${d.y})rotate(${d.rotate})`)
+          .style("font-size", d => `${d.size}px`)
+          .style("fill", (d, i) => palette[i % palette.length])
+          .transition().duration(500)
+          .attr("opacity", 1);
+      }
+    }
+
+    // Listen to Firestore (no orderBy/limit on small data — easier rules + index-free)
+    const q = query(
+      collection(db, "wordcloud_words"),
+      orderBy("created_at", "desc"),
+      limit(500),
+    );
+
+    onSnapshot(q, (snap) => {
+      const docs = snap.docs.map(d => d.data());
+      const words = tally(docs);
+      totalEl.textContent = docs.length;
+      uniqueEl.textContent = words.length;
+      render(words);
+    }, (err) => {
+      console.error(err);
+      emptyEl.innerHTML = `<div style="color:#ef4444">讀取失敗：${err.message}</div>`;
+      emptyEl.style.display = "";
+    });
+
+    // Re-render on resize
+    let resizeTimer = null;
+    window.addEventListener("resize", () => {
+      const cur = `${window.innerWidth}x${window.innerHeight}`;
+      if (cur === lastSize) return;
+      lastSize = cur;
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (svg) svg.selectAll("*").remove();
+        // Trigger re-render with current data on next snapshot tick
+      }, 250);
+    });
+  </script>
+</body>
+</html>
